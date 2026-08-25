@@ -23,8 +23,8 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "Tooony133/Qwen-3.8-27B-DinkyDoo"
-      revision: "511fbd527de68c9816a8fc8c5401c9da80541927"
+      model: "dora7/earlybird"
+      revision: "2473205168211a4b7eb31ff44b99f03df0deb961"
       gpu_ids: "0,1,2"
       tensor_parallel_size: 1
       data_parallel_size: 3
@@ -55,7 +55,7 @@ embedder:
 actors:
   planner:
     client: "coder-instance"
-    model: "Tooony133/Qwen-3.8-27B-DinkyDoo"
+    model: "dora7/earlybird"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -73,7 +73,7 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "Tooony133/Qwen-3.8-27B-DinkyDoo"
+    model: "dora7/earlybird"
     workers: 256
     queue_size: 128
     max_tokens: 24576
