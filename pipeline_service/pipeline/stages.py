@@ -215,7 +215,9 @@ async def _resolve_bracket(
     async def _judge_duel(left: Candidate, right: Candidate, round_no: int) -> Candidate:
         """Compare two live candidates head-to-head and return the winner."""
         label = f"R{round_no} k{left.k}-vs-k{right.k}"
+        _t_q = time.monotonic()
         async with sem_judge:
+            _t_s = time.monotonic()
             verdict = await judge.compare(
                 task_id=task.stem,
                 match_label=label,
@@ -231,7 +233,11 @@ async def _resolve_bracket(
                 embeddings_b=right.judge_embeddings,
             )
         winner = left if verdict.winner == "A" else right
-        logger.info(f"[BRACKET {label}] {task.stem} -> k{winner.k}")
+        _t_e = time.monotonic()
+        logger.info(
+            f"[BRACKET {label}] {task.stem} -> k{winner.k} | "
+            f"[JUDGE_TIMING] queue_wait={_t_s - _t_q:.1f}s compare={_t_e - _t_s:.1f}s in_flight={sem_judge._value}"
+        )
         return winner
 
     async def _winner_of(lo: int, hi: int) -> Candidate | None:
@@ -307,8 +313,10 @@ class _CandidateFactory:
         send_image: bool,
         checker_mode: str,
         ensemble_temperature: float,
+        seed_offset: int = 0,
     ) -> None:
         self.task = task
+        self.seed_offset = seed_offset
         self.coder = coder
         self.judge = judge
         self.embedder = embedder
@@ -370,7 +378,7 @@ class _CandidateFactory:
 
     async def _generate(self, k: int) -> Candidate:
         task = self.task
-        cand = Candidate(k=k, seed=task.seed + k)
+        cand = Candidate(k=k, seed=task.seed + self.seed_offset + k)
         t0 = time.time()
         try:
             async with stage_guard(task, f"coder#k{k}", self.sem_coder, self.status):
@@ -463,6 +471,7 @@ async def multigen_first_iter(
     ensemble_size: int,
     ensemble_temperature: float,
     render_from_object: bool = False,
+    seed_offset: int = 0,
 ) -> None:
     """K-of-N generation + judge bracket. Replaces code_and_check + renderer
     on iteration 0 when `coder.ensemble_size > 1`.
@@ -495,6 +504,7 @@ async def multigen_first_iter(
         send_image=send_image,
         checker_mode="with_object" if render_from_object else "sanity",
         ensemble_temperature=ensemble_temperature,
+        seed_offset=seed_offset,
     )
 
     # Launch every coder at once, then embed the reference while they run; each

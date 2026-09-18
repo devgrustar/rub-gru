@@ -9,6 +9,20 @@ pipeline:
   use_planner: false
   render_from_object: true
   refinement_enabled: false
+  seed_offset: 1000003
+  # Warm-up coder throughput probe: 48 text-only code requests x 512 tokens, aggregate output tok/s.
+  # min_tps 0 = measure and log only. CALIBRATE before enabling: run one healthy 4xH200 pod, read
+  # "[Coder probe] ... tok/s" from pipeline.log, set min_tps to ~0.8x that value.
+  coder_probe:
+    enabled: true
+    concurrency: 48
+    max_tokens: 512
+    min_tps: 0
+
+preflight:
+  min_tflops: 30
+  min_stream48_gbps: 0
+  min_power_limit_w: 0
 
 benchmark: true
 warmup: true
@@ -23,16 +37,18 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "dora7/earlybird"
-      revision: "2473205168211a4b7eb31ff44b99f03df0deb961"
-      gpu_ids: "0,1,2"
+      model: "magicworld7/qwen36-27b-it0-fp8"
+      revision: "45e8433923d9c62af45462e2f4d7083b89c3931b"
+      gpu_ids: "0,1"
       tensor_parallel_size: 1
-      data_parallel_size: 3
+      data_parallel_size: 2
       vllm_bin: "/opt/vllm-coder-env/bin/vllm"
       gpu_memory_utilization: 0.9
       max_model_len: 81920
       max_num_seqs: 256
-      extra_args: ["--speculative-config", "{\"method\":\"mtp\",\"num_speculative_tokens\":2}"]
+      extra_args:
+        - "--speculative-config"
+        - '{"method":"dflash","model":"z-lab/Qwen3.6-27B-DFlash","revision":"0919688658996800f86b895034249700e9481106","num_speculative_tokens":7}'
   judge-critic-instance:
     enabled: true
     base_url: "http://localhost:8002/v1"
@@ -40,22 +56,25 @@ llm_clients:
     vllm:
       model: "zai-org/GLM-4.6V-Flash"
       revision: "411bb4d77144a3f03accbf4b780f5acb8b7cde4e" 
-      gpu_ids: "3"
+      gpu_ids: "2,3"
       tensor_parallel_size: 1
+      data_parallel_size: 2
       gpu_memory_utilization: 0.5
       max_model_len: 81920
       max_num_seqs: 196
+      extra_args: ["--max-num-batched-tokens", "16384"]
       vllm_bin: "/opt/vllm-glm-env/bin/vllm"
       trust_remote_code: true
       reasoning_parser: null
 
 embedder:
-  revision: "fc6921f7a0b44d5b33ab4482cfed5443db6ccd81"
+  model_id: "Fluxmire/dinov3-vits16-pretrain-lvd1689m"
+  revision: "1b5ff8f92bb8e8c36de80bf4c49035c105f070ee"
 
 actors:
   planner:
     client: "coder-instance"
-    model: "dora7/earlybird"
+    model: "magicworld7/qwen36-27b-it0-fp8"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -64,7 +83,7 @@ actors:
     top_k: 20
     min_p: 0.0
     presence_penalty: 0.0
-    repetition_penalty: 1.0
+    repetition_penalty: 1.08
     seed: 42
     reasoning_effort: "medium"
     enable_thinking: false
@@ -73,7 +92,7 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "dora7/earlybird"
+    model: "magicworld7/qwen36-27b-it0-fp8"
     workers: 256
     queue_size: 128
     max_tokens: 24576
@@ -82,11 +101,11 @@ actors:
     top_k: 20
     min_p: 0.0
     presence_penalty: 0.0
-    repetition_penalty: 1.0
+    repetition_penalty: 1.08
     seed: 42
     enable_thinking: false
     multimodal: true
-    ensemble_size: 50
+    ensemble_size: 48
     ensemble_temperature: 0.6
     providers:
       order: []
@@ -105,7 +124,7 @@ actors:
     top_k: 20
     min_p: 0.0
     presence_penalty: 0.0
-    repetition_penalty: 1.0
+    repetition_penalty: 1.08
     seed: 42
     reasoning_effort: "medium"
     enable_thinking: false
@@ -146,7 +165,7 @@ renderer:
   startup_timeout_s: 60.0
   request_timeout_s: 90.0
   node_binary: "node"
-  img_size: 518
+  img_size: 1024
   grid_gap: 5
   bg_color: null
   lighting: neutral

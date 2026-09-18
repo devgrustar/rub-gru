@@ -18,3 +18,6 @@ results
 tests/**/*.js
 tests/**/*.png
 tests/**/*.json
+# runtime logs (serve.py writes logs/pipeline.log relative to its cwd)
+pipeline_service/logs/
+logs/

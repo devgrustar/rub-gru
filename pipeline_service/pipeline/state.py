@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from enum import Enum
 from typing import Any
 
@@ -34,6 +35,11 @@ class MinerState:
         # in cloud-only deployments — see models_ready() below.
         self.llm_status: dict[str, ServiceState] = {}
         self.replacements_remaining: int = 0
+        # Host diagnostics: preflight metrics, coder-probe tok/s, batch timing. Rendered into the
+        # `// miner-diag:` header of every module in /results (serve.py).
+        self.diag: dict[str, Any] = {}
+        self.batch_started_at: float | None = None
+        self.batch_index: int = 0
 
     def reset_for_batch(self, stems: list[str], seed: int) -> None:
         self.total = len(stems)
@@ -41,6 +47,8 @@ class MinerState:
         self.batch_stems = stems
         self.seed = seed
         self.status = MinerStatus.GENERATING
+        self.batch_started_at = time.time()
+        self.batch_index += 1
 
     def record_task(self, task: "PipelineTask") -> None:
         self.tasks[task.stem] = task

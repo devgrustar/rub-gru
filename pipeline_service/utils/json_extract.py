@@ -6,15 +6,12 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _JSON_FENCE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
-def strip_think_block(raw: str) -> str:
-    """Remove a leading/embedded <think>...</think> reasoning block, if present."""
-    return _THINK_BLOCK.sub("", raw).strip()
-
 
 def extract_json_object(raw: str) -> str:
     """Return the JSON object substring from `raw`, or `raw` itself if no match.
     """
-    raw = strip_think_block(raw.strip())
+    raw = raw.strip()
+    raw = _THINK_BLOCK.sub("", raw).strip()
     fenced = _JSON_FENCE.search(raw)
     if fenced:
         raw = fenced.group(1).strip()

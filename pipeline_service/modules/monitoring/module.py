@@ -34,7 +34,13 @@ def _checker_worker(
         if not await _probe_health(health_url):
             return ProbeResult.down(model, "health check failed")
         try:
-            await client.models.list()
+            served = {entry.id for entry in (await client.models.list()).data}
+            # Reachable is not the same as serving this model. An endpoint that serves a
+            # different one answers every generation with NotFoundError while the pod
+            # still reports healthy, so health has to mean that this model in particular
+            # is being served.
+            if model not in served:
+                return ProbeResult.down(model, f"endpoint serves {sorted(served)}, not {model}")
             return ProbeResult.running(model)
         except (openai.APIConnectionError, openai.APITimeoutError) as e:
             return ProbeResult.starting(model, str(e))

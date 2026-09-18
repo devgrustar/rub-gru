@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -30,6 +31,28 @@ class JSCheckerModule(BaseModule):
             if not runner.exists():
                 logger.warning(f"js_checker runner not found at {runner}")
 
+    @staticmethod
+    def _nan_bbox_detail(metrics) -> str:
+        """Return a failure detail if the validator's bbox carries null/NaN/inf coordinates, else ''."""
+        if not isinstance(metrics, dict):
+            return ""
+        bbox = metrics.get("bbox")
+        if not isinstance(bbox, dict):
+            return ""
+        bad = []
+        for side in ("min", "max"):
+            coords = bbox.get(side)
+            if not isinstance(coords, dict):
+                bad.append(f"{side}=missing")
+                continue
+            for axis in ("x", "y", "z"):
+                v = coords.get(axis)
+                if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    bad.append(f"{side}.{axis}={v!r}")
+        if not bad:
+            return ""
+        return f"bbox has non-finite coordinates ({', '.join(bad[:6])}); vertices={metrics.get('vertices', '?')}"
+
     async def process(self, task: PipelineTask, mode: str = "sanity") -> PipelineTask:
         logger.info(
             f"[JS_CHECK] '{task.stem}' start | mode={mode} | "
@@ -54,7 +77,17 @@ class JSCheckerModule(BaseModule):
         if mode == "with_object" and task.js_valid:
             task.scene_json = result.get("object")
 
-        failures = result.get("failures", [])
+        failures = list(result.get("failures", []))
+        # NaN-geometry hole in the validator (ours and production alike): Box3 of NaN
+        # vertices is not isEmpty() (NaN<NaN is false) and no bound check fires, so a
+        # module whose every triangle the GPU drops still passes as valid — and the
+        # bracket can crown an invisible champion (r40 stem 0c469b0d, all-angle pen 10).
+        # JSON turns NaN into null, so a null/non-finite bbox coordinate means NaN geometry.
+        if task.js_valid:
+            nan_detail = self._nan_bbox_detail(task.js_metrics)
+            if nan_detail:
+                task.js_valid = False
+                failures.append({"rule": "NAN_GEOMETRY", "detail": nan_detail})
         task.js_errors = []
         for f in failures:
             rule = f.get("rule", "UNKNOWN")

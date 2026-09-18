@@ -21,7 +21,7 @@ from modules.scene_coder.prompts import (
 )
 from modules.scene_planner.schema import OSD
 from config.settings import ActorConfig
-from utils.json_extract import strip_think_block
+
 
 class SceneCoderAgent(BaseAgent):
     """Per-pipeline JS code generator."""
@@ -254,7 +254,7 @@ class SceneCoderAgent(BaseAgent):
 
     @staticmethod
     def _normalize_js_output(raw: str) -> str:
-        text = strip_think_block(raw.strip())
+        text = raw.strip()
         if text.startswith("```"):
             lines = text.splitlines()
             if lines:

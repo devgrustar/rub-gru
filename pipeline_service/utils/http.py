@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import mimetypes
 from urllib.parse import urlparse
@@ -45,14 +46,27 @@ async def download_image(
     if own_client:
         client = httpx.AsyncClient(timeout=30.0)
     try:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        if len(resp.content) > max_bytes:
-            raise ValueError(f"Image too large: {len(resp.content)} bytes (max {max_bytes})")
-        mime = (resp.headers.get("content-type", "").split(";")[0].strip()
-                or mimetypes.guess_type(url)[0]
-                or "image/png")
-        return resp.content, mime
+        # Retry the prompt-image fetch: a single transient hiccup on the prompt host
+        # (429/503/reset) otherwise fails the whole prompt at the prepare stage, which is
+        # an automatic duel loss for that stem in a live round.
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                if len(resp.content) > max_bytes:
+                    raise ValueError(f"Image too large: {len(resp.content)} bytes (max {max_bytes})")
+                mime = (resp.headers.get("content-type", "").split(";")[0].strip()
+                        or mimetypes.guess_type(url)[0]
+                        or "image/png")
+                return resp.content, mime
+            except ValueError:
+                raise  # oversize / bad payload: not worth retrying
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 3:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+        raise last_exc if last_exc else RuntimeError("download_image failed")
     finally:
         if own_client:
             await client.aclose()

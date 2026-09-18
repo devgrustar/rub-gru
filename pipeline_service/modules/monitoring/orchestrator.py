@@ -73,6 +73,25 @@ async def _watch_models(state: MinerState, app: FastAPI, pipeline: GenerationPip
                 state.set_llm_status(name, checker.result.state)
 
             if state.status == MinerStatus.WARMING_UP and state.models_ready():
+                # Coder throughput probe (once): batch wall = coder tokens / tok/s, so a slow host shows
+                # up here before any timed batch. Request REPLACE only while replacements remain; with
+                # remaining=0 the /status handler forces WARMING_UP again and the probe is not re-run.
+                probe_cfg = pipeline.settings.pipeline.coder_probe
+                if probe_cfg.enabled and "probe_tps" not in state.diag:
+                    tps = await pipeline.run_coder_probe()
+                    if tps is not None and probe_cfg.min_tps > 0 and tps < probe_cfg.min_tps:
+                        if state.replacements_remaining > 0:
+                            logger.warning(
+                                f"[Coder probe] {tps:.0f} tok/s < min_tps {probe_cfg.min_tps:.0f} "
+                                f"(replacements_remaining={state.replacements_remaining}) — requesting REPLACE"
+                            )
+                            state.status = MinerStatus.REPLACE
+                            await asyncio.sleep(10)
+                            continue
+                        logger.warning(
+                            f"[Coder probe] {tps:.0f} tok/s < min_tps {probe_cfg.min_tps:.0f} but no replacements "
+                            f"remain — continuing on this pod"
+                        )
                 logger.info("[Warmup] running warmup generation")
                 warmup_image_path = Path(__file__).parent.parent.parent / "warmup.png"
                 warmup_data_url = f"data:image/png;base64,{base64.b64encode(warmup_image_path.read_bytes()).decode()}"  

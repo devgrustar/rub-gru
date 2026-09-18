@@ -44,6 +44,7 @@ class Pipeline:
         coder_ensemble_size: int = 1,
         coder_ensemble_temperature: float = 0.3,
         render_from_object: bool = False,
+        seed_offset: int = 0,
         refinement_enabled: bool = True,
         planner_limit: int = 2,
         coder_limit: int = 2,
@@ -66,6 +67,7 @@ class Pipeline:
         self.coder_ensemble_size = coder_ensemble_size
         self.coder_ensemble_temperature = coder_ensemble_temperature
         self.render_from_object = render_from_object
+        self.seed_offset = seed_offset
         self.refinement_enabled = refinement_enabled
 
         self.max_iter = max_iter
@@ -132,6 +134,7 @@ class Pipeline:
                     ensemble_size=self.coder_ensemble_size,
                     ensemble_temperature=self.coder_ensemble_temperature,
                     render_from_object=self.render_from_object,
+                    seed_offset=self.seed_offset,
                 )
             else:
                 # Next iterations without multigen (base coder, patcher and repair agent)

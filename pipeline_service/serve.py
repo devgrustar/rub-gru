@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import os
+import time
 import zipfile
 from contextlib import asynccontextmanager
 
@@ -66,11 +67,64 @@ def _build_checkers() -> dict[str, OrchestratorChecker]:
     return checkers
 
 
+_PREFLIGHT_METRICS = os.environ.get("PREFLIGHT_METRICS_FILE", "/tmp/preflight_metrics.json")
+
+
+def _load_preflight_metrics() -> None:
+    """Fold /tmp/preflight_metrics.json (written by modules.metrics.preflight) into state.diag."""
+    try:
+        with open(_PREFLIGHT_METRICS) as f:
+            m = json.load(f)
+    except Exception:
+        return
+    host = m.get("host") or {}
+    gpus = m.get("gpus") or []
+    d = state.diag
+    d["preflight_ok"] = m.get("ok")
+    d["cpu_quota"] = host.get("cpu_quota")
+    d["nproc"] = host.get("nproc")
+    d["mem_gb"] = host.get("mem_gb")
+    net = m.get("network") or {}
+    d["net_mbps"] = net.get("download_mbps")
+    if gpus:
+        names = sorted({str(g.get("gpu_name", "?")).replace("NVIDIA ", "") for g in gpus})
+        d["gpus"] = f"{len(gpus)}x{'/'.join(names)}"
+        d["tflops"] = [g.get("tflops_bf16") for g in gpus]
+        d["stream48"] = [g.get("stream48_gbps") for g in gpus]
+        d["power_w"] = [g.get("power_limit_w") for g in gpus]
+    logger.info(f"preflight metrics loaded: {d}")
+
+
+def _diag_header() -> str:
+    """One ASCII comment line describing the host this module was generated on."""
+    d = state.diag
+    def _lst(v):
+        if isinstance(v, list):
+            return "/".join("?" if x is None else f"{float(x):.0f}" for x in v)
+        return "?" if v is None else str(v)
+    wall = int(time.time() - state.batch_started_at) if state.batch_started_at else None
+    parts = [
+        f"gpus={d.get('gpus', '?')}",
+        f"tflops={_lst(d.get('tflops'))}",
+        f"stream48={_lst(d.get('stream48'))}",
+        f"power={_lst(d.get('power_w'))}",
+        f"probe_tps={d.get('probe_tps', '?')}",
+        f"cpu_quota={d.get('cpu_quota', '?')}/{d.get('nproc', '?')}",
+        f"net={d.get('net_mbps', '?')}",
+        f"batch={state.batch_index}",
+        f"wall={wall if wall is not None else '?'}",
+        f"seed={state.seed}",
+    ]
+    line = "// miner-diag: " + " ".join(parts)
+    return "".join(ch for ch in line if 32 <= ord(ch) < 127) + "\n"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if os.path.exists("/tmp/pod_replace"):
         logger.warning("pre-flight failed — pod marked for replacement")
         state.status = MinerStatus.REPLACE
+    _load_preflight_metrics()
 
     checkers = _build_checkers()
     if not checkers:
@@ -166,9 +220,12 @@ async def results():
     if state.status != MinerStatus.COMPLETE:
         raise HTTPException(409, f"Not complete, current status: {state.status.value}")
 
+    header = _diag_header()
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for stem, js_code in state.results.items():
+            if not js_code.startswith("// miner-diag:"):
+                js_code = header + js_code
             zf.writestr(f"{stem}.js", js_code)
         if state.failed:
             failed_list = [{"stem": s, "reason": r} for s, r in state.failed.items()]

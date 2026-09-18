@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 
 from openai import AsyncOpenAI
 
 from config.settings import ActorConfig
 from logger_config import logger
 from modules.base_agent import BaseAgent
+from modules.judge import multi_stage as _ms
 from modules.judge.multi_stage import ViewsAdapter, best_view_similarity, evaluate_duel
 from modules.judge.schema import JudgeVerdict
 
@@ -64,6 +66,13 @@ class JudgeAgent(BaseAgent):
         self.max_stage = max_stage
         self.s1_concurrency = s1_concurrency
         self.reasoning_effort = settings.reasoning_effort
+        if not getattr(settings, "explain", False):
+            # The explain call is opponent-independent and only fills detail["issues"]; skipping it saves the heaviest
+            # image request per duel (reference + both grids) without changing any verdict.
+            async def _no_explain(*_a, **_k):
+                return _ms._neutral_issues().issues
+            _ms._explain_run = _no_explain
+            logger.info("[Judge] explain call disabled (actors.judge.explain=false)")
 
     async def _draw_tiebreak(
         self, left_views: ViewsAdapter, right_views: ViewsAdapter
@@ -100,6 +109,7 @@ class JudgeAgent(BaseAgent):
         embeddings_a: bytes | None = None,
         embeddings_b: bytes | None = None,
     ) -> JudgeVerdict:
+        _t0 = time.monotonic()
         prompt_url = _data_url(reference_bytes, reference_mime)
         grid_a = _b64(render_a)
         grid_b = _b64(render_b)
@@ -117,7 +127,12 @@ class JudgeAgent(BaseAgent):
             embeddings=_b64(embeddings_b) if embeddings_b else None,
         )
 
+        _enc_s = time.monotonic() - _t0
+        _payload_kb = (len(prompt_url) + len(grid_a) + len(grid_b)
+                       + sum(len(v) for v in left_views._white.values()) + sum(len(v) for v in right_views._white.values())
+                       + sum(len(v) for v in left_views._gray.values()) + sum(len(v) for v in right_views._gray.values())) / 1024
         prefix = f"[Judge {match_label}]"
+        logger.info(f"{prefix} [JUDGE_TIMING] b64_encode={_enc_s*1000:.0f}ms payload={_payload_kb:.0f}KB")
         logger.info(
             f"{prefix} Started Task {task_id} | Model: {self.model} | "
             f"max_stage={self.max_stage} | "
