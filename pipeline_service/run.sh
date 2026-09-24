@@ -65,20 +65,11 @@ fi
 
 
 # Dedicated coder vLLM env. Same idea as the GLM env above: config-driven and
-# idempotent. It builds when missing and upgrades when the requested version
-# changes. Non-fatal: failures are logged.
+# idempotent, so it only builds when configuration.yaml points a client at
+# $CODER_VLLM_BIN and the binary is missing. Non-fatal: failures are logged.
 CODER_VLLM_BIN="${CODER_VLLM_BIN:-/opt/vllm-coder-env/bin/vllm}"
-# DFlash2 model support landed in vLLM 0.28.0. Keep the coder in its
-# dedicated vLLM environment so the GLM server remains independently pinned.
-CODER_VLLM_VERSION="${CODER_VLLM_VERSION:-0.28.0}"
-CODER_VLLM_INSTALLED_VERSION=""
-if [ -x "$CODER_VLLM_BIN" ]; then
-    CODER_VLLM_INSTALLED_VERSION="$($CODER_VLLM_BIN --version 2>/dev/null | awk '{print $NF}' || true)"
-fi
-if [ "$CODER_VLLM_INSTALLED_VERSION" != "$CODER_VLLM_VERSION" ]; then
-    [ -n "$CODER_VLLM_INSTALLED_VERSION" ] \
-        && echo "=== STAGE 2.6: upgrading coder vLLM $CODER_VLLM_INSTALLED_VERSION -> $CODER_VLLM_VERSION ===" \
-        || echo "=== STAGE 2.6: building coder vLLM env $CODER_VLLM_VERSION ($CODER_VLLM_BIN missing) ==="
+CODER_VLLM_VERSION="${CODER_VLLM_VERSION:-0.24.0}"
+if [ ! -x "$CODER_VLLM_BIN" ]; then
     CODER_MODEL_INFO="$(GLM_VLLM_BIN="$CODER_VLLM_BIN" python - <<'PY'
 import os, yaml
 try:
@@ -98,10 +89,10 @@ PY
     CODER_MODEL="$(sed -n 1p <<<"$CODER_MODEL_INFO")"
     CODER_REVISION="$(sed -n 2p <<<"$CODER_MODEL_INFO")"
     if [ -n "$CODER_MODEL" ]; then
+        echo "=== STAGE 2.6: building coder vLLM env $CODER_VLLM_VERSION ($CODER_VLLM_BIN missing) ==="
         echo "[run.sh] coder env build target: $CODER_MODEL @ ${CODER_REVISION:-main}"
         VENV="$(dirname "$(dirname "$CODER_VLLM_BIN")")" \
         VLLM_VERSION="$CODER_VLLM_VERSION" \
-        TORCH_BACKEND="cu129" \
         MODEL="$CODER_MODEL" MODEL_REVISION="$CODER_REVISION" \
             bash "$SCRIPT_DIR/scripts/setup_glm_vllm_env.sh" \
             || echo "[run.sh] coder env setup failed — the coder cannot start without $CODER_VLLM_BIN; check logs" >&2

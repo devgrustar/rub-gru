@@ -63,6 +63,7 @@ def build_pipeline(
     if ensemble_size > 1:
         judge: JudgeAgent | None = JudgeAgent(
             clients[actors.judge.client], settings=actors.judge,
+            max_stage=actors.judge.max_stage,
         )
         embedder: DinoEmbedder | None = (
             DinoEmbedder(settings.embedder) if settings.embedder.enabled else None

@@ -1,2 +1,2 @@
---extra-index-url https://download.pytorch.org/whl/cu129
-vllm @ https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl
+--extra-index-url https://download.pytorch.org/whl/cu128
+vllm==0.17.1

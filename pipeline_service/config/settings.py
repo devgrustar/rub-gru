@@ -122,6 +122,7 @@ class LLMClientConfig(BaseModel):
 class ActorConfig(BaseModel):
     """Per-actor config."""
     explain: bool = False  # judge only: run the opponent-independent 'explain' GLM call (fills detail['issues']; no effect on the verdict)
+    max_stage: int = 4  # judge only: deepest multi-stage judge stage to run (1-4). 3 skips the S4 side guard (never changed a verdict in 543 logged duels)
 
     workers: int = 1
     queue_size: int = 8
