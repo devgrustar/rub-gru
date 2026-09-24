@@ -9,7 +9,7 @@ pipeline:
   use_planner: false
   render_from_object: true
   refinement_enabled: false
-  seed_offset: 4800004
+  seed_offset: 4800014
   # Warm-up coder throughput probe: 48 text-only code requests x 512 tokens, aggregate output tok/s.
   # min_tps 0 = measure and log only. CALIBRATE before enabling: run one healthy 4xH200 pod, read
   # "[Coder probe] ... tok/s" from pipeline.log, set min_tps to ~0.8x that value.
@@ -103,7 +103,7 @@ actors:
     seed: 42
     enable_thinking: false
     multimodal: true
-    ensemble_size: 64
+    ensemble_size: 40
     ensemble_temperature: 0.8
     providers:
       order: []
