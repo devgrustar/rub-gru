@@ -4,20 +4,74 @@ import asyncio
 import gc
 import time
 import os
+from pathlib import Path
 
 import httpx
 from openai import AsyncOpenAI
+from pydantic import BaseModel
 
 from config.settings import LLMClientConfig, SettingsConf
 from logger_config import logger
 from modules.js_checker.module import JSCheckerModule
 from modules.renderer.module import RendererModule
+from pipeline.candidate_export import write_dump
 from pipeline.factory import build_pipeline
 from pipeline.orchestrator import Pipeline
 from pipeline.state import MinerState
 from pipeline.task import PipelineTask
 
 _PLACEHOLDER_KEYS = {"", "placeholder", "your-key-here", "sk-or-...", "changeme"}
+
+
+class JudgeBatchStats(BaseModel):
+    """Judge summary over one batch, from the per-duel records in task.meta["judge_duels"]."""
+    duels: int = 0
+    s1_decided: int = 0
+    s2_decided: int = 0
+    s3_decided: int = 0
+    s4_stepdown: int = 0
+    draws: int = 0
+    s1_early_stopped: int = 0
+    s1_requests_saved: int = 0
+    compare_mean_s: float = 0.0
+    compare_p90_s: float = 0.0
+    queue_mean_s: float = 0.0
+
+    def log_line(self) -> str:
+        n = max(self.duels, 1)
+        return (
+            f"[Batch judge] duels={self.duels} s1={100 * self.s1_decided / n:.0f}% s2={100 * self.s2_decided / n:.0f}% "
+            f"s3={100 * self.s3_decided / n:.0f}% s4_stepdown={self.s4_stepdown} draws={self.draws} "
+            f"s1_early={self.s1_early_stopped} (saved {self.s1_requests_saved} S1 requests) "
+            f"compare_mean={self.compare_mean_s:.1f}s p90={self.compare_p90_s:.1f}s queue_mean={self.queue_mean_s:.1f}s"
+        )
+
+
+def _judge_batch_stats(tasks) -> JudgeBatchStats:
+    duels = [d for t in tasks for d in (t.meta or {}).get("judge_duels", [])]
+    stats = JudgeBatchStats(duels=len(duels))
+    for d in duels:
+        by = str(d.get("decided_by", ""))
+        s1_slim = (d.get("detail") or {}).get("s1_slim") or {}
+        if s1_slim.get("early_stopped"):
+            stats.s1_early_stopped += 1
+            stats.s1_requests_saved += 2 * (4 - int(s1_slim.get("n_total", 4)))
+        if "tie-break" in by or "draw ->" in by:
+            stats.draws += 1
+        elif by.startswith("S4"):
+            stats.s4_stepdown += 1
+        elif by.startswith("S3"):
+            stats.s3_decided += 1
+        elif by.startswith("S2"):
+            stats.s2_decided += 1
+        elif by.startswith("S1"):
+            stats.s1_decided += 1
+    if duels:
+        compare = sorted(float(d.get("compare_s", 0.0)) for d in duels)
+        stats.compare_mean_s = sum(compare) / len(compare)
+        stats.compare_p90_s = compare[min(len(compare) - 1, int(0.9 * len(compare)))]
+        stats.queue_mean_s = sum(float(d.get("queue_s", 0.0)) for d in duels) / len(duels)
+    return stats
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0")
 
 
@@ -73,10 +127,6 @@ class GenerationPipeline:
             self._clients[name] = AsyncOpenAI(
                 base_url=cfg.base_url,
                 api_key=api_key,
-                # At large ensemble sizes the tail prompts' candidates wait behind the whole
-                # coder queue; a 900 s client timeout killed every candidate of the last prompts
-                # in a batch (APITimeoutError). The batch budget is the real deadline. Connect
-                # timeout 120 s so judge bursts retry instead of falling back to neutral.
                 timeout=httpx.Timeout(3600.0, connect=120.0),
                 max_retries=0,
             )
@@ -112,7 +162,11 @@ class GenerationPipeline:
         )
         logger.info(f"Critic: {actors.critic.client} | Model: {actors.critic.model}")
         if actors.coder.ensemble_size > 1:
-            logger.info(f"Judge: {actors.judge.client} | Model: {actors.judge.model}")
+            logger.info(
+                f"Judge: {actors.judge.client} | Model: {actors.judge.model} | "
+                f"max_stage={actors.judge.max_stage.value} | s1_concurrency={actors.judge.s1_concurrency} | "
+                f"bracket={self.settings.pipeline.bracket.model_dump()}"
+            )
         else:
             logger.info("Judge: DISABLED (ensemble_size=1)")
         logger.info(f"Iter cap: {eb.max_iter} | Deadline: {eb.task_deadline_s:.0f}s | Threshold: {eb.score_threshold:.2f}")
@@ -164,11 +218,13 @@ class GenerationPipeline:
             )
             
         budget = self.settings.pipeline.batch_time_budget
+        dump_root = self.settings.pipeline.candidate_dump_dir
 
         async def run_one(task: PipelineTask) -> None:
             while True:
                 result = await (await self._pipeline.submit(task))
-                # Three attempts per prompt: a missing module is scored as a loss.
+                if dump_root and result.candidates:
+                    await self._dump_candidates(result, Path(dump_root))
                 if not result.failed or task.attempt >= 2:
                     self.state.record_task(result)
                     return
@@ -203,13 +259,25 @@ class GenerationPipeline:
                 f"[Batch done] {len(self.state.results)} ok, "
                 f"{len(self.state.failed)} failed"
             )
+            logger.info(_judge_batch_stats(self.state.tasks.values()).log_line())
     
+    async def _dump_candidates(self, task: PipelineTask, root: Path) -> None:
+        """Persist every candidate of one task attempt (code, renders, judge inputs) for offline experiments."""
+        try:
+            out, count = await asyncio.to_thread(write_dump, task, root, self.state.batch_index)
+            logger.info(
+                f"[Candidate dump] {task.stem} attempt={task.attempt} -> {out} "
+                f"({len(task.candidates)} candidates, {count} files)"
+            )
+        except Exception as exc:
+            logger.warning(f"[Candidate dump] {task.stem} failed: {exc!r}")
+
     async def run_coder_probe(self) -> float | None:
         """Measure the coder endpoint's aggregate output tok/s with `concurrency` text-only code requests.
 
         Returns tok/s (None when disabled / no client / every request failed). Records
         state.diag['probe_tps'] and friends. The batch wall-clock is coder tokens / tok/s, so this
-        number predicts the audit fit; the caller decides REPLACE vs continue.
+        number predicts whether the batch fits its time budget; the caller decides REPLACE vs continue.
         """
         cfg = self.settings.pipeline.coder_probe
         if not cfg.enabled:
@@ -238,9 +306,6 @@ class GenerationPipeline:
             usage = getattr(resp, "usage", None)
             return int(getattr(usage, "completion_tokens", 0) or 0)
 
-        # Untimed warm-up burst first (same shape as the timed one): on a fresh pod the first concurrent burst still
-        # pays FlashInfer/Triton JIT and CUDA-graph capture for the batch-48 shapes — a single small warm-up request
-        # was not enough (fresh pod: 2481 tok/s after a 64-token warm-up vs 3146 with a warm JIT cache; cold 2116).
         t_w = time.monotonic()
         try:
             warm = await asyncio.wait_for(
@@ -296,8 +361,6 @@ class GenerationPipeline:
             logger.info("[Warmup task cancelled]")
             raise
         except Exception as exc:
-            # Never fall through to READY on a failed warmup: the caller keeps the pod at
-            # warming_up and retries, which beats advertising a pod that cannot generate.
             logger.exception(f"[Warmup failed] {exc}")
             raise
         finally:

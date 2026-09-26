@@ -47,8 +47,8 @@ class _Slot:
 
 class RendererModule(BaseModule):
     _PING_INTERVAL_S = 5.0
-    _PING_TIMEOUT_S = 5.0
-    _PING_STRIKES = 3
+    _PING_TIMEOUT_S = 15.0
+    _PING_STRIKES = 6
     _SPAWN_BACKOFF_INITIAL_S = 1.0
     _SPAWN_BACKOFF_MAX_S = 30.0
     _TERM_GRACE_S = 5.0
@@ -319,6 +319,45 @@ class RendererModule(BaseModule):
         gray = {self._JUDGE_GRAY_VIEW: gray_png} if gray_png else {}
         return rendered, gray
 
+    async def render_views(
+        self, task: PipelineTask, views: list[str], *, img_size: int
+    ) -> dict[str, bytes]:
+        """Render named preset views only, at ``img_size``, on the judge's white background.
+
+        No grid, no mutation of the task: a probe the caller reads and discards.
+        Returns an empty dict on any failure — callers treat that as "no decision".
+        """
+        if task.failed or (not task.js_code and not task.scene_json):
+            return {}
+        payload: dict = {
+            "views": [{"name": v, "bg": self.config.judge_white_bg} for v in views],
+            "options": {"imgSize": img_size, "lighting": self.config.lighting.value},
+        }
+        if task.scene_json is not None:
+            payload["object"] = task.scene_json
+        else:
+            payload["source"] = task.js_code
+
+        try:
+            resp, sidecar_idx = await self._post_with_retry("/render/views", payload)
+        except Exception as exc:  # noqa: BLE001 - a probe never fails its caller
+            logger.warning(f"[RENDERER] '{task.stem}' probe FAIL (http) | {type(exc).__name__}: {exc}")
+            return {}
+        if resp.status_code != 200:
+            logger.warning(
+                f"[RENDERER] '{task.stem}' probe FAIL (status) sidecar=#{sidecar_idx} | "
+                f"HTTP {resp.status_code}: {resp.text[:200] if resp.text else ''}"
+            )
+            return {}
+
+        rendered: dict[str, bytes] = {}
+        for name, b64 in (resp.json().get("views") or {}).items():
+            try:
+                rendered[name] = base64.b64decode(b64)
+            except Exception as exc:  # noqa: BLE001 - skip a single bad view, keep the rest
+                logger.warning(f"[RENDERER] probe view {name!r} decode failed: {exc}")
+        return rendered
+
     def _grid_specs(self) -> list[dict]:
         bg = self.config.bg_color
         return [
@@ -393,8 +432,8 @@ class RendererModule(BaseModule):
 
         try:
             tiles = [rendered.pop(key) for key in GRID_KEYS]
-            task.rendered_png = compose_grid(
-                tiles, img_size=self.config.img_size, gap=self.config.grid_gap
+            task.rendered_png = await asyncio.to_thread(
+                compose_grid, tiles, img_size=self.config.img_size, gap=self.config.grid_gap
             )
         except (KeyError, ValueError) as exc:
             task.render_errors = [f"grid tile invalid: {exc}"]

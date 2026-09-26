@@ -14,11 +14,21 @@ from pipeline.task import PipelineTask
 
 _RUNNER_JS = Path(__file__).parent / "validate_runner.mjs"
 _SERIALIZE_RUNNER_JS = Path(__file__).parent / "serialize_runner.mjs"
+_ROTATE_RUNNER_JS = Path(__file__).parent / "rotate_runner.mjs"
 
 _RUNNERS = {
     "sanity": _RUNNER_JS,
     "with_object": _SERIALIZE_RUNNER_JS,
 }
+
+
+def _node_cwd(runner: Path) -> str:
+    """First directory that actually carries node_modules for the runner's imports."""
+    preferred = os.environ.get("NODE_CWD", str(runner.parent))
+    for candidate in (preferred, "/workspace", str(runner.parent)):
+        if os.path.isdir(os.path.join(candidate, "node_modules")):
+            return candidate
+    return preferred
 
 
 class JSCheckerModule(BaseModule):
@@ -78,11 +88,6 @@ class JSCheckerModule(BaseModule):
             task.scene_json = result.get("object")
 
         failures = list(result.get("failures", []))
-        # NaN-geometry hole in the validator (ours and production alike): Box3 of NaN
-        # vertices is not isEmpty() (NaN<NaN is false) and no bound check fires, so a
-        # module whose every triangle the GPU drops still passes as valid — and the
-        # bracket can crown an invisible champion (r40 stem 0c469b0d, all-angle pen 10).
-        # JSON turns NaN into null, so a null/non-finite bbox coordinate means NaN geometry.
         if task.js_valid:
             nan_detail = self._nan_bbox_detail(task.js_metrics)
             if nan_detail:
@@ -136,6 +141,53 @@ class JSCheckerModule(BaseModule):
 
         return task
 
+    async def rotate_source(self, code: str, steps: list[tuple[str, str]]) -> str | None:
+        """Write `steps` (axis, angle expression) into the module's own generate(), before every return.
+
+        Returns the rewritten source, or None when the module has no shape the injector can edit —
+        the caller then keeps the original candidate.
+        """
+        if not code or not steps:
+            return None
+        if not _ROTATE_RUNNER_JS.exists():
+            logger.warning(f"[JS_CHECK] rotate runner missing at {_ROTATE_RUNNER_JS}")
+            return None
+
+        tmp_dir = tempfile.mkdtemp(prefix="jsrotate_")
+        try:
+            code_path = os.path.join(tmp_dir, "module.mjs")
+            with open(code_path, "w", encoding="utf-8") as f:
+                f.write(code)
+            args = [arg for axis, angle in steps for arg in (axis, angle)]
+            proc = await asyncio.create_subprocess_exec(
+                self.config.node_binary,
+                str(_ROTATE_RUNNER_JS), code_path, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=_node_cwd(_ROTATE_RUNNER_JS),
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning("[JS_CHECK] rotate runner timed out")
+                return None
+            if proc.returncode != 0:
+                logger.warning(
+                    f"[JS_CHECK] rotate runner failed: {stderr.decode('utf-8', errors='replace').strip()[:200]}"
+                )
+                return None
+            rotated = stdout.decode("utf-8", errors="replace")
+            return rotated or None
+        except Exception as exc:  # noqa: BLE001 - rotation is optional, never fails the candidate
+            logger.warning(f"[JS_CHECK] rotate runner error: {exc}")
+            return None
+        finally:
+            import shutil
+
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     async def _validate(self, code: str, mode: str = "sanity") -> dict:
         runner = _RUNNERS.get(mode)
         if runner is None:
@@ -150,11 +202,7 @@ class JSCheckerModule(BaseModule):
             with open(code_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
-            node_cwd = os.environ.get("NODE_CWD", str(runner.parent))
-            for candidate in [node_cwd, "/workspace", str(runner.parent)]:
-                if os.path.isdir(os.path.join(candidate, "node_modules")):
-                    node_cwd = candidate
-                    break
+            node_cwd = _node_cwd(runner)
 
             proc = await asyncio.create_subprocess_exec(
                 self.config.node_binary,

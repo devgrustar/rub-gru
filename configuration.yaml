@@ -9,15 +9,21 @@ pipeline:
   use_planner: false
   render_from_object: true
   refinement_enabled: false
-  seed_offset: 4800014
-  # Warm-up coder throughput probe: 48 text-only code requests x 512 tokens, aggregate output tok/s.
-  # min_tps 0 = measure and log only. CALIBRATE before enabling: run one healthy 4xH200 pod, read
-  # "[Coder probe] ... tok/s" from pipeline.log, set min_tps to ~0.8x that value.
+  seed_offset: 4900024
   coder_probe:
     enabled: true
     concurrency: 48
     max_tokens: 512
     min_tps: 0
+  bracket:
+    final_round_robin: false
+    tiebreak_confirmation: false
+    tiebreak_temperature: 0.3
+    log_similarity: true
+  orientation:
+    enabled: true
+    img_size: 512
+  candidate_dump_dir: "generated_outputs/candidates"
 
 preflight:
   min_tflops: 30
@@ -37,8 +43,8 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "magicworld7/Qwen-3.6-27B-Sable"
-      revision: "f5d3cb4eaa35974654f2f923829e30d50f9f0d2e"
+      model: "magicworld7/Qwen-3.6-27B-Kestrel"
+      revision: "4f8fd126e05db5c3812bb4944539750b74ee77fe"
       gpu_ids: "0,1"
       tensor_parallel_size: 1
       data_parallel_size: 2
@@ -72,7 +78,7 @@ embedder:
 actors:
   planner:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Sable"
+    model: "magicworld7/Qwen-3.6-27B-Kestrel"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -90,20 +96,20 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Sable"
+    model: "magicworld7/Qwen-3.6-27B-Kestrel"
     workers: 96
     queue_size: 64
     max_tokens: 24576
     temperature: 0.8
     top_p: 0.95
-    top_k: 30
+    top_k: 50
     min_p: 0.0
-    presence_penalty: 0.3
+    presence_penalty: 0.5
     repetition_penalty: 1.0
     seed: 42
     enable_thinking: false
     multimodal: true
-    ensemble_size: 40
+    ensemble_size: 32
     ensemble_temperature: 0.8
     providers:
       order: []
@@ -139,6 +145,13 @@ actors:
     temperature: 0.0
     seed: 42
     max_stage: 3
+    s1_concurrency: 8
+    s1_early_stop:
+      enabled: true
+      angles: 2
+      min_gap: 2.0
+      single_angle_min_gap: 2.5
+      max_round: 4
     providers:
       order: []
       allow_fallbacks: true
@@ -161,7 +174,7 @@ js_checker:
 renderer:
   sidecar_host: "127.0.0.1"
   sidecar_port: 8003
-  startup_timeout_s: 60.0
+  startup_timeout_s: 180.0
   request_timeout_s: 90.0
   node_binary: "node"
   img_size: 1024

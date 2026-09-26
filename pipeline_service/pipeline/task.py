@@ -23,11 +23,11 @@ class Candidate:
     judge_gray_views: dict[str, bytes] = field(default_factory=dict)
     # DINOv3 embeddings npz bytes (prompt + view_<name>...) for judge stage S2BV.
     judge_embeddings: bytes | None = None
+    judge_views: Any = field(default=None, repr=False, compare=False)
     elapsed_s: float = 0.0
     drop_reason: str | None = None
 
 
-#TODO zmiana na pydantic
 @dataclass
 class PipelineTask:
     """Single envelope threaded through every pipeline stage."""
@@ -40,6 +40,7 @@ class PipelineTask:
     # Fetched image
     image_bytes: bytes | None = None
     image_mime: str = "image/jpeg"
+    judge_ref_url: str | None = field(default=None, repr=False)
 
     # Planner → OSD
     osd: str | None = None                 # JSON string for debug endpoints

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import time
 
 from openai import AsyncOpenAI
 
-from config.settings import ActorConfig
+from config.settings import JudgeConfig
 from logger_config import logger
 from modules.base_agent import BaseAgent
 from modules.judge import multi_stage as _ms
@@ -27,6 +26,26 @@ def _views_to_b64(views: dict[str, bytes] | None) -> dict[str, str]:
     if not views:
         return {}
     return {name: _b64(data) for name, data in views.items() if data}
+
+
+def _build_views(
+    grid: bytes,
+    white: dict[str, bytes] | None,
+    gray: dict[str, bytes] | None,
+    embeddings: bytes | None,
+) -> ViewsAdapter:
+    return ViewsAdapter(
+        white_views=_views_to_b64(white), gray_views=_views_to_b64(gray), grid=_b64(grid),
+        embeddings=_b64(embeddings) if embeddings else None,
+    )
+
+
+def _payload_kb(views: ViewsAdapter) -> float:
+    return (
+        len(views._grid)
+        + sum(len(v) for v in views._white.values())
+        + sum(len(v) for v in views._gray.values())
+    ) / 1024
 
 
 _WINNER_TO_SIDE: dict[str, str] = {"left": "A", "right": "B", "draw": "A"}
@@ -50,44 +69,52 @@ def _confidence_from_decided_by(decided_by: str, winner: str) -> float:
 
 
 class JudgeAgent(BaseAgent):
-    """Pairwise visual judge backed by the duel-eval multi-stage pipeline."""
-    
+    """Pairwise visual judge backed by the multi-stage duel pipeline."""
+
     actor = "judge"
 
-    def __init__(
-        self,
-        client: AsyncOpenAI,
-        settings: ActorConfig,
-        *,
-        max_stage: int = 4,
-        s1_concurrency: int = 8,
-    ) -> None:
+    def __init__(self, client: AsyncOpenAI, settings: JudgeConfig) -> None:
         super().__init__(client, settings)
-        self.max_stage = max_stage
-        self.s1_concurrency = s1_concurrency
-        self.reasoning_effort = settings.reasoning_effort
-        if not getattr(settings, "explain", False):
-            # The explain call is opponent-independent and only fills detail["issues"]; skipping it saves the heaviest
-            # image request per duel (reference + both grids) without changing any verdict.
+        self.max_stage = settings.max_stage.value
+        self.s1_concurrency = settings.s1_concurrency
+        self.s1_early_stop = settings.s1_early_stop
+        if not settings.explain:
             async def _no_explain(*_a, **_k):
                 return _ms._neutral_issues().issues
             _ms._explain_run = _no_explain
             logger.info("[Judge] explain call disabled (actors.judge.explain=false)")
 
+    async def encode_reference(self, image_bytes: bytes, mime: str) -> str:
+        """Reference image as a data URL, encoded off the event loop."""
+        return await asyncio.to_thread(_data_url, image_bytes, mime)
+
+    async def encode_views(
+        self,
+        *,
+        grid: bytes,
+        white: dict[str, bytes] | None,
+        gray: dict[str, bytes] | None,
+        embeddings: bytes | None,
+    ) -> ViewsAdapter:
+        """One candidate's judge inputs, base64-encoded once for every duel it plays."""
+        return await asyncio.to_thread(_build_views, grid, white, gray, embeddings)
+
+    def early_stop_for_round(self, round_no: int) -> bool:
+        return self.s1_early_stop.enabled and round_no <= self.s1_early_stop.max_round
+
+    async def similarity(self, views: ViewsAdapter) -> float | None:
+        """DINOv3 best-view cosine similarity to the reference; None without embeddings."""
+        try:
+            return best_view_similarity(await views.fetch_embeddings())
+        except Exception as exc:
+            logger.warning(f"[Judge] similarity failed: {exc!r}")
+            return None
+
     async def _draw_tiebreak(
         self, left_views: ViewsAdapter, right_views: ViewsAdapter
     ) -> tuple[str, str, bool]:
         """Break a duel draw by DINOv3 best-view similarity to the reference."""
-        try:
-            emb_a, emb_b = await asyncio.gather(
-                left_views.fetch_embeddings(), right_views.fetch_embeddings()
-            )
-            sim_a = best_view_similarity(emb_a)
-            sim_b = best_view_similarity(emb_b)
-        except Exception as exc:  
-            logger.warning(f"[Judge] draw tie-break failed: {exc!r}")
-            sim_a = sim_b = None
-
+        sim_a, sim_b = await asyncio.gather(self.similarity(left_views), self.similarity(right_views))
         if sim_a is not None and sim_b is not None and sim_a != sim_b:
             side = "A" if sim_a > sim_b else "B"
             return side, f"DINO tie-break (simA={sim_a:.3f} simB={sim_b:.3f} -> {side})", True
@@ -98,47 +125,25 @@ class JudgeAgent(BaseAgent):
         *,
         task_id: str,
         match_label: str,
-        reference_bytes: bytes,
-        reference_mime: str,
-        render_a: bytes,
-        render_b: bytes,
-        white_views_a: dict[str, bytes] | None = None,
-        white_views_b: dict[str, bytes] | None = None,
-        gray_views_a: dict[str, bytes] | None = None,
-        gray_views_b: dict[str, bytes] | None = None,
-        embeddings_a: bytes | None = None,
-        embeddings_b: bytes | None = None,
+        prompt_url: str,
+        left_views: ViewsAdapter,
+        right_views: ViewsAdapter,
+        s1_temperature: float = 0.0,
+        seed: int | None = None,
+        max_stage: int | None = None,
+        early_stop: bool | None = None,
     ) -> JudgeVerdict:
-        _t0 = time.monotonic()
-        prompt_url = _data_url(reference_bytes, reference_mime)
-        grid_a = _b64(render_a)
-        grid_b = _b64(render_b)
-
-        left_views = ViewsAdapter(
-            white_views=_views_to_b64(white_views_a),
-            gray_views=_views_to_b64(gray_views_a),
-            grid=grid_a,
-            embeddings=_b64(embeddings_a) if embeddings_a else None,
-        )
-        right_views = ViewsAdapter(
-            white_views=_views_to_b64(white_views_b),
-            gray_views=_views_to_b64(gray_views_b),
-            grid=grid_b,
-            embeddings=_b64(embeddings_b) if embeddings_b else None,
-        )
-
-        _enc_s = time.monotonic() - _t0
-        _payload_kb = (len(prompt_url) + len(grid_a) + len(grid_b)
-                       + sum(len(v) for v in left_views._white.values()) + sum(len(v) for v in right_views._white.values())
-                       + sum(len(v) for v in left_views._gray.values()) + sum(len(v) for v in right_views._gray.values())) / 1024
+        seed = self.seed if seed is None else seed
+        max_stage = self.max_stage if max_stage is None else max_stage
+        use_early_stop = self.s1_early_stop.enabled if early_stop is None else early_stop
         prefix = f"[Judge {match_label}]"
-        logger.info(f"{prefix} [JUDGE_TIMING] b64_encode={_enc_s*1000:.0f}ms payload={_payload_kb:.0f}KB")
         logger.info(
             f"{prefix} Started Task {task_id} | Model: {self.model} | "
-            f"max_stage={self.max_stage} | "
-            f"Ref KB: {len(reference_bytes) / 1024:.1f} | "
-            f"A KB: {len(render_a) / 1024:.1f} | B KB: {len(render_b) / 1024:.1f} | "
-            f"white A/B: {len(white_views_a or {})}/{len(white_views_b or {})}"
+            f"max_stage={max_stage} | "
+            f"payload A/B KB: {_payload_kb(left_views):.0f}/{_payload_kb(right_views):.0f} | "
+            f"white A/B: {len(left_views._white)}/{len(right_views._white)}"
+            + (f" | s1_temperature={s1_temperature}" if s1_temperature else "")
+            + (" | s1_early_stop" if use_early_stop else "")
         )
 
         sem = asyncio.Semaphore(self.s1_concurrency)
@@ -148,10 +153,12 @@ class JudgeAgent(BaseAgent):
             prompt_url,
             left_views,
             right_views,
-            seed=self.seed,
+            seed=seed,
             model=self.model,
             log_id=f"{task_id} {match_label}",
-            max_stage=self.max_stage,
+            max_stage=max_stage,
+            s1_temperature=s1_temperature,
+            early_stop=self.s1_early_stop if use_early_stop else None,
         )
 
         if winner == "draw":

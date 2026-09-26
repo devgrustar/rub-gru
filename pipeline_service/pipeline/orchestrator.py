@@ -5,6 +5,7 @@ import time
 
 import httpx
 
+from config.settings import BracketConfig, OrientationConfig
 from llm.session_store import SessionStore
 from logger_config import logger
 from pipeline.stages import (
@@ -45,6 +46,8 @@ class Pipeline:
         coder_ensemble_temperature: float = 0.3,
         render_from_object: bool = False,
         seed_offset: int = 0,
+        bracket: BracketConfig | None = None,
+        orientation: OrientationConfig | None = None,
         refinement_enabled: bool = True,
         planner_limit: int = 2,
         coder_limit: int = 2,
@@ -68,6 +71,8 @@ class Pipeline:
         self.coder_ensemble_temperature = coder_ensemble_temperature
         self.render_from_object = render_from_object
         self.seed_offset = seed_offset
+        self.bracket = bracket or BracketConfig()
+        self.orientation = orientation or OrientationConfig()
         self.refinement_enabled = refinement_enabled
 
         self.max_iter = max_iter
@@ -135,6 +140,8 @@ class Pipeline:
                     ensemble_temperature=self.coder_ensemble_temperature,
                     render_from_object=self.render_from_object,
                     seed_offset=self.seed_offset,
+                    bracket=self.bracket,
+                    orientation=self.orientation,
                 )
             else:
                 # Next iterations without multigen (base coder, patcher and repair agent)

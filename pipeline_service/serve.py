@@ -14,6 +14,7 @@ from fastapi.responses import Response, StreamingResponse, FileResponse
 
 from config.settings import LLMClientConfig, settings
 from logger_config import logger
+from pipeline.candidate_export import build_manifest, build_zip
 from pipeline.generation_pipeline import GenerationPipeline
 from pipeline.state import MinerState, MinerStatus
 from pipeline.task import PipelineTask
@@ -234,7 +235,6 @@ async def results():
     return StreamingResponse(zip_buffer, media_type="application/zip")
 
 
-
 def _completed_task_view(t: PipelineTask) -> dict:
     osd_preview = (t.osd[:80] + "…") if t.osd and len(t.osd) > 80 else t.osd
     return {
@@ -341,7 +341,44 @@ async def debug_task(stem: str):
             "score_history": task.score_history,
         },
         "meta": task.meta,
+        "candidates_top": [
+            {"k": c.k, "seed": c.seed, "drop_reason": c.drop_reason, "js_code": c.js_code}
+            for c in (task.candidates or [])
+            if c.k in set(task.meta.get("bracket_top", []))
+        ],
     }
+def _completed_task(stem: str) -> PipelineTask:
+    task = state.tasks.get(stem)
+    if task is None:
+        if stem in state.batch_stems:
+            raise HTTPException(202, f"Task '{stem}' still in progress")
+        raise HTTPException(404, f"Task '{stem}' not found in current batch")
+    return task
+
+
+@app.get("/debug/tasks/{stem}/candidates")
+async def debug_task_candidates(stem: str):
+    """Every candidate of the task with its code inline (no renders); see pipeline/candidate_export.py."""
+    task = _completed_task(stem)
+    manifest = build_manifest(task, state.batch_index).model_dump()
+    code_by_k = {c.k: c.js_code for c in task.candidates}
+    for record in manifest["candidates"]:
+        record["js_code"] = code_by_k.get(record["k"])
+    return manifest
+
+
+@app.get("/debug/tasks/{stem}/candidates.zip")
+async def debug_task_candidates_zip(stem: str, renders: bool = True):
+    """Full candidate export as a zip: manifest, reference, k??.js and (renders=true) every judge view + embeddings."""
+    task = _completed_task(stem)
+    data = await asyncio.to_thread(build_zip, task, state.batch_index, renders=renders)
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{stem}_candidates.zip"'},
+    )
+
+
 @app.get("/debug/logs")
 async def debug_logs():
     log_path = "logs/pipeline.log"

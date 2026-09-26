@@ -95,6 +95,30 @@ class DinoEmbedder:
             vecs.append(pooled.detach().to("cpu").float().numpy())
         return self._np.concatenate(vecs, axis=0)
 
+    @staticmethod
+    def view_similarities(embeddings: bytes | None) -> dict[str, float]:
+        """Cosine similarity of every `view_<name>` vector in a candidate npz to its `prompt` vector."""
+        if not embeddings:
+            return {}
+        import numpy as np
+
+        with np.load(io.BytesIO(embeddings)) as data:
+            prompt = data["prompt"]
+            return {
+                key[len("view_"):]: round(float(np.dot(data[key], prompt)), 4)
+                for key in data.files
+                if key.startswith("view_")
+            }
+
+    @staticmethod
+    def similarities(ref_vec: Any | None, vecs: dict[str, Any]) -> dict[str, float]:
+        """Cosine similarity of in-memory view vectors to the reference vector."""
+        if ref_vec is None or not vecs:
+            return {}
+        import numpy as np
+
+        return {name: round(float(np.dot(v, ref_vec)), 4) for name, v in vecs.items()}
+
     async def embed_reference(self, image: bytes) -> Any | None:
         """Embed the reference image. Returns an opaque vector or None if disabled."""
         if not image or not await self._ensure_loaded():
@@ -106,23 +130,40 @@ class DinoEmbedder:
             logger.warning(f"[DINO] reference embedding failed: {exc!r}")
             return None
 
-    async def build_candidate_npz(
-        self, ref_vec: Any | None, views: dict[str, bytes]
-    ) -> bytes | None:
-        """Embed candidate views and pack {prompt, view_<name>...} into npz bytes.
+    async def embed_views(self, views: dict[str, bytes]) -> dict[str, Any] | None:
+        """Embed rendered views into in-memory vectors keyed by view name.
 
-        Returns None when the embedder is disabled, ``ref_vec`` is missing, or no
-        views were rendered — the judge then runs S2BV-free.
+        Returns None when the embedder is disabled or nothing embeddable was given.
         """
-        if ref_vec is None or not views or not await self._ensure_loaded():
+        if not views or not await self._ensure_loaded():
             return None
         names = [n for n, b in views.items() if b]
         if not names:
             return None
         try:
             arr = await asyncio.to_thread(self._embed_sync, [views[n] for n in names])
+        except Exception as exc:  
+            logger.warning(f"[DINO] view embedding failed: {exc!r}")
+            return None
+        return dict(zip(names, arr))
+
+    async def build_candidate_embeddings(
+        self, ref_vec: Any | None, views: dict[str, bytes]
+    ) -> bytes | None:
+        """Embed candidate views and pack {prompt, view_<name>...} into npz bytes —
+        the transport format the judge and the candidate export read.
+
+        Returns None when the embedder is disabled, ``ref_vec`` is missing, or no
+        views were rendered — the judge then runs S2BV-free.
+        """
+        if ref_vec is None:
+            return None
+        vecs = await self.embed_views(views)
+        if not vecs:
+            return None
+        try:
             payload = {"prompt": ref_vec}
-            for n, vec in zip(names, arr):
+            for n, vec in vecs.items():
                 payload[f"view_{n}"] = vec
             buf = io.BytesIO()
             self._np.savez(buf, **payload)

@@ -8,7 +8,6 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, asdict, field
 
-# Legacy knobs kept for env compatibility; the bf16 benchmark below uses fixed shapes.
 MATRIX_SIZE = int(os.environ.get("BENCHMARK_MATRIX_SIZE", "8192"))
 DURATION_SEC = float(os.environ.get("BENCHMARK_DURATION_SEC", "3.0"))
 STREAM_GB = float(os.environ.get("BENCHMARK_STREAM_GB", "2.0"))
@@ -107,14 +106,6 @@ def resolve_vllm_gpu_config(
 
 
 # Benchmark
-#
-# Why these three numbers (measured 2026-09-05 on an H100 PCIe, 300 W vs 200 W power cap; real coder tok/s fell 22 %):
-#   - raw copy bandwidth did not move at all (1850 -> 1847 GB/s): a "GPU bandwidth" check passes a power-throttled host,
-#   - bf16 matmul TFLOPS fell 39 % (365 -> 222): reacts, but overshoots,
-#   - a decode-shaped GEMM that streams weights x[M,K] @ W[K,N] with M = running seqs x (MTP acceptance+1) brackets the real
-#     drop: M=48 -14 %, M=144 -33 %.  That is what a bandwidth/compute-bound decode step looks like, without any model download.
-# Thresholds are per GPU family (env override) and deliberately loose until calibrated on a healthy 4xH200 pod
-# (run `python -m modules.metrics.gpu` there and read the numbers).
 
 @dataclass
 class GPUBenchmarkResult:
@@ -128,7 +119,6 @@ class GPUBenchmarkResult:
     sm_clock_mhz: int | None
     passed: bool
     reasons: list[str] = field(default_factory=list)
-    # legacy alias so old log readers keep working
     @property
     def tflops(self) -> float:
         return self.tflops_bf16
@@ -138,13 +128,13 @@ def gpu_thresholds(gpu_name: str) -> tuple[float, float]:
     """(min bf16 TFLOPS, min M=48 weight-stream GB/s) for this GPU family; env overrides win."""
     name = (gpu_name or "").upper()
     if "H200" in name:
-        d = (530.0, 3000.0)     # healthy H200 SXM measured 2026-09-05 (4 GPUs x 3 restarts): 652-669 TFLOPS, stream48 3697-3739 GB/s -> ~-20 %
+        d = (530.0, 3000.0)
     elif "B200" in name:
         d = (600.0, 3000.0)
     elif "H100" in name:
-        d = (250.0, 1100.0)     # H100 PCIe @300 W: 365 TFLOPS, 1567 GB/s ; @200 W: 222 / 1347
+        d = (250.0, 1100.0)
     else:
-        d = (30.0, 0.0)         # unknown family: legacy sanity only
+        d = (30.0, 0.0)
     return (
         float(os.environ.get("BENCHMARK_MIN_TFLOPS", d[0])),
         float(os.environ.get("BENCHMARK_MIN_STREAM48_GBPS", d[1])),
@@ -186,7 +176,6 @@ def _benchmark_single_gpu(
     n_mat = max(2, int(stream_gb * 1024**3 // per_mat))
     Ws = [torch.randn(K, N, device=device, dtype=torch.bfloat16) for _ in range(n_mat)]
 
-    # 1. compute-bound: sustained bf16 matmul
     a, b = Ws[0], Ws[1]
     for _ in range(3):
         a @ b
@@ -200,7 +189,6 @@ def _benchmark_single_gpu(
     elapsed = time.monotonic() - start
     tflops = round(ops * 2.0 * K * N * K / elapsed / 1e12, 1)
 
-    # 2. decode-shaped: stream all weights through x[M,K] @ W for M = 48 and 144
     def stream(M: int) -> float:
         x = torch.randn(M, K, device=device, dtype=torch.bfloat16)
         for W in Ws[:2]:

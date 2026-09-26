@@ -35,8 +35,6 @@ class MinerState:
         # in cloud-only deployments — see models_ready() below.
         self.llm_status: dict[str, ServiceState] = {}
         self.replacements_remaining: int = 0
-        # Host diagnostics: preflight metrics, coder-probe tok/s, batch timing. Rendered into the
-        # `// miner-diag:` header of every module in /results (serve.py).
         self.diag: dict[str, Any] = {}
         self.batch_started_at: float | None = None
         self.batch_index: int = 0

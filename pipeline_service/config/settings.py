@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from enum import Enum
 from pathlib import Path
 
 import yaml
@@ -11,10 +13,9 @@ from modules.judge.embedder_settings import EmbedderConfig
 from modules.renderer.settings import RendererConfig
 
 _here = Path(__file__).parent.parent
-config_file_dir = _here / "configuration.yaml"
+config_file_dir = Path(os.environ["CONFIG_FILE"]) if os.environ.get("CONFIG_FILE") else _here / "configuration.yaml"
 if not config_file_dir.exists():
     config_file_dir = _here.parent / "configuration.yaml"
-
 
 
 class APIConfig(BaseModel):
@@ -28,7 +29,7 @@ class CoderProbeConfig(BaseModel):
 
     Sends `concurrency` text-only code requests to the coder and measures aggregate output tok/s.
     The batch wall-clock is coder tokens / tok/s, so this is the one number that predicts whether the
-    audit host fits the 7200 s regeneration budget. With min_tps > 0 and replacements remaining, a slower
+    pod finishes a batch within its time budget. With min_tps > 0 and replacements remaining, a slower
     pod requests REPLACE; min_tps = 0 only logs. Calibrate on a healthy 4xH200 pod first and set min_tps
     to ~0.8 x the probe value measured there.
     """
@@ -48,6 +49,23 @@ class PreflightConfig(BaseModel):
     min_download_mbps: float | None = None
 
 
+class BracketConfig(BaseModel):
+    """Experimental judge-bracket variants. Each changes which candidate wins, so measure judge agreement
+    offline before enabling any of them in production."""
+    final_round_robin: bool = False
+    tiebreak_confirmation: bool = False
+    tiebreak_temperature: float = Field(default=0.3, ge=0.0, le=1.0)
+    log_similarity: bool = False
+
+
+class OrientationConfig(BaseModel):
+    """Bring a candidate to the orientation the judge scores it in: a cheap low-res probe picks the side that
+    matches the reference, the rotation is then written into the candidate's own generate() before its return.
+    Enable only after an offline judge agreement run, since it changes which candidate wins."""
+    enabled: bool = False
+    img_size: int = 512
+
+
 class PipelineConfig(BaseModel):
     batch_time_budget: float = 1800.0
     prompt_timeout: float = 120.0
@@ -58,10 +76,10 @@ class PipelineConfig(BaseModel):
     # (multigen + judge bracket when ensemble_size > 1, else a single coder pass).
     refinement_enabled: bool = True
     coder_probe: CoderProbeConfig = Field(default_factory=CoderProbeConfig)
-    # Added to the round seed for every candidate (seed = round_seed + seed_offset + k). Give each of our
-    # hotkeys a different offset so two miners never sample the same seed stream: byte-identical outputs
-    # shared across hotkeys are a source-audit ban criterion.
     seed_offset: int = 0
+    bracket: BracketConfig = Field(default_factory=BracketConfig)
+    orientation: OrientationConfig = Field(default_factory=OrientationConfig)
+    candidate_dump_dir: str | None = None
 
 
 class VllmServeConfig(BaseModel):
@@ -121,8 +139,6 @@ class LLMClientConfig(BaseModel):
 
 class ActorConfig(BaseModel):
     """Per-actor config."""
-    explain: bool = False  # judge only: run the opponent-independent 'explain' GLM call (fills detail['issues']; no effect on the verdict)
-    max_stage: int = 4  # judge only: deepest multi-stage judge stage to run (1-4). 3 skips the S4 side guard (never changed a verdict in 543 logged duels)
 
     workers: int = 1
     queue_size: int = 8
@@ -144,6 +160,37 @@ class ActorConfig(BaseModel):
     multimodal: bool = False
     providers: ProviderRoutingConfig | None = None
 
+
+class JudgeMaxStage(int, Enum):
+    """Depth of the judge cascade: S1 only, +S2 sub-judges, +S3 gray rescue on an S2 draw, +S4 side guard (full)."""
+    S1 = 1
+    S2 = 2
+    S3 = 3
+    S4 = 4
+
+
+class S1EarlyStopAngles(int, Enum):
+    ONE = 1
+    TWO = 2
+
+
+class S1EarlyStopConfig(BaseModel):
+    """Skip the remaining S1 angles once the first ones agree (bracket rounds R1..max_round only)."""
+    enabled: bool = False
+    angles: S1EarlyStopAngles = S1EarlyStopAngles.TWO
+    min_gap: float = Field(default=2.0, ge=0.0)
+    single_angle_min_gap: float = Field(default=2.5, ge=0.0)
+    max_round: int = Field(default=4, ge=1)
+
+
+class JudgeConfig(ActorConfig):
+    """Judge-only knobs. `max_tokens`/`temperature` are ignored here: every cascade stage hardcodes its own."""
+    explain: bool = False
+    max_stage: JudgeMaxStage = JudgeMaxStage.S4
+    s1_concurrency: int = Field(default=8, ge=1)
+    s1_early_stop: S1EarlyStopConfig = Field(default_factory=S1EarlyStopConfig)
+
+
 class ActorsConfig(BaseModel):
     planner: ActorConfig = ActorConfig(
         workers=2, queue_size=8,
@@ -159,7 +206,7 @@ class ActorsConfig(BaseModel):
         workers=3, queue_size=8,
         client="openrouter", model="qwen/qwen2.5-vl-72b-instruct",
     )
-    judge: ActorConfig = ActorConfig(
+    judge: JudgeConfig = JudgeConfig(
         workers=4, queue_size=8,
         client="openrouter", model="qwen/qwen2.5-vl-72b-instruct",
         max_tokens=1024,

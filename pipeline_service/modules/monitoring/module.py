@@ -35,10 +35,6 @@ def _checker_worker(
             return ProbeResult.down(model, "health check failed")
         try:
             served = {entry.id for entry in (await client.models.list()).data}
-            # Reachable is not the same as serving this model. An endpoint that serves a
-            # different one answers every generation with NotFoundError while the pod
-            # still reports healthy, so health has to mean that this model in particular
-            # is being served.
             if model not in served:
                 return ProbeResult.down(model, f"endpoint serves {sorted(served)}, not {model}")
             return ProbeResult.running(model)

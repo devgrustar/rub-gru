@@ -46,9 +46,6 @@ async def download_image(
     if own_client:
         client = httpx.AsyncClient(timeout=30.0)
     try:
-        # Retry the prompt-image fetch: a single transient hiccup on the prompt host
-        # (429/503/reset) otherwise fails the whole prompt at the prepare stage, which is
-        # an automatic duel loss for that stem in a live round.
         last_exc: Exception | None = None
         for attempt in range(4):
             try:
@@ -61,7 +58,7 @@ async def download_image(
                         or "image/png")
                 return resp.content, mime
             except ValueError:
-                raise  # oversize / bad payload: not worth retrying
+                raise
             except Exception as exc:
                 last_exc = exc
                 if attempt < 3:

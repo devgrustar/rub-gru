@@ -8,13 +8,17 @@ import re
 import struct
 import zlib
 from collections import Counter
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 from openai import AsyncOpenAI
+from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
 
 from logger_config import logger
+
+if TYPE_CHECKING:
+    from config.settings import S1EarlyStopConfig
 
 try:  
     import numpy as np  
@@ -530,8 +534,12 @@ def _slim_s1(s1: dict, choice: str) -> dict:
         "choice": choice,
         "n_total": s1["n_total"],
         "n_consistent": s1["n_consistent"],
+        "early_stopped": s1.get("early_stopped", 0),
         "angles": [
-            {"label": a["label"], "pen_a": a["pen_a"], "pen_b": a["pen_b"]}
+            {
+                "label": a["label"], "pen_a": a["pen_a"], "pen_b": a["pen_b"],
+                "ab": a["ab"], "ba": a["ba"], "contradictory": a["contradictory"],
+            }
             for a in s1["angles"]
         ],
     }
@@ -609,6 +617,41 @@ def _s1_messages(prompt_url: str, left_url: str, right_url: str, angle_desc: str
     ]
 
 
+def _s1_reduce_angle(ab: PenaltyResponse, ba: PenaltyResponse, theta: int, phi: int, weight: float, label: str) -> dict:
+    pen_a_ab, pen_b_ab = ab.penalty_1, ab.penalty_2
+    pen_a_ba, pen_b_ba = ba.penalty_2, ba.penalty_1
+    diff_ab = pen_a_ab - pen_b_ab
+    diff_ba = pen_a_ba - pen_b_ba
+    json_failed = ab.issues == JSON_FAILED_MARKER or ba.issues == JSON_FAILED_MARKER
+    contradictory = json_failed or ((diff_ab > 0 and diff_ba < 0) or (diff_ab < 0 and diff_ba > 0))
+    return {
+        "theta": theta,
+        "phi": phi,
+        "weight": weight,
+        "label": label,
+        "ab": _strip_issues(ab),
+        "ba": _strip_issues(ba),
+        "pen_a": (pen_a_ab + pen_a_ba) / 2,
+        "pen_b": (pen_b_ab + pen_b_ba) / 2,
+        "diff_ab": diff_ab,
+        "diff_ba": diff_ba,
+        "contradictory": contradictory,
+        "json_failed": json_failed,
+    }
+
+
+def _s1_early_gate(angles: list[dict], cfg: "S1EarlyStopConfig") -> bool:
+    """True when the angles judged so far are consistent, same side and wide enough to settle the duel."""
+    if not angles or any(a["contradictory"] for a in angles):
+        return False
+    diffs = [a["pen_a"] - a["pen_b"] for a in angles]
+    if any(d == 0 for d in diffs) or not (all(d > 0 for d in diffs) or all(d < 0 for d in diffs)):
+        return False
+    if len(angles) == 1 and cfg.single_angle_min_gap > 0 and abs(diffs[0]) >= cfg.single_angle_min_gap:
+        return True
+    return len(angles) >= cfg.angles.value and all(abs(d) >= cfg.min_gap for d in diffs)
+
+
 async def _s1_run(
     vlm: AsyncOpenAI,
     model: str,
@@ -617,7 +660,10 @@ async def _s1_run(
     left_views: ViewsAdapter,
     right_views: ViewsAdapter,
     seed: int,
+    temperature: float = 0.0,
+    early_stop: "S1EarlyStopConfig | None" = None,
 ) -> dict:
+    """Stage 1: four front angles x both side orders; with `early_stop` the first angles go one at a time."""
     async def _ask(left_url: str, right_url: str, angle_desc: str) -> PenaltyResponse:
         async with sem:
             r = await _safe_chat_json(
@@ -627,68 +673,50 @@ async def _s1_run(
                 label="s1_prompt_match",
                 model=model,
                 seed=seed,
-                temperature=0.0,
+                temperature=temperature,
                 max_tokens=1024,
                 max_retries=5,
                 on_failure=_neutral_penalty(),
             )
             return cast(PenaltyResponse, r)
 
-    tasks: list[asyncio.Task] = []
-    for _theta, _phi, _weight, label in S1_ANGLES:
-        if not left_views.has_white(label) or not right_views.has_white(label):
-            logger.warning(f"S1: missing white view {label!r}, skipping angle")
-            continue
+    async def _angle(theta: int, phi: int, weight: float, label: str) -> dict:
         a_url = left_views.white_url(label)
         b_url = right_views.white_url(label)
         desc = S1_ANGLE_DESC[label]
-        tasks.append(asyncio.create_task(_ask(a_url, b_url, desc)))
-        tasks.append(asyncio.create_task(_ask(b_url, a_url, desc)))
+        ab, ba = await asyncio.gather(_ask(a_url, b_url, desc), _ask(b_url, a_url, desc))
+        return _s1_reduce_angle(ab, ba, theta, phi, weight, label)
 
-    if not tasks:
-        return {"angles": [], "n_total": 0, "n_contradictory": 0, "n_consistent": 0, "n_json_failed": 0}
-
-    raw = await asyncio.gather(*tasks)
-
-    angles: list[dict] = []
-    n_json_failed = 0
-    pair_idx = 0
-    for _theta, _phi, weight, label in S1_ANGLES:
-        if not left_views.has_white(label) or not right_views.has_white(label):
+    order: list[tuple[int, int, float, str]] = []
+    for angle in S1_ANGLES:
+        if not left_views.has_white(angle[3]) or not right_views.has_white(angle[3]):
+            logger.warning(f"S1: missing white view {angle[3]!r}, skipping angle")
             continue
-        ab = raw[pair_idx]
-        ba = raw[pair_idx + 1]
-        pair_idx += 2
-        pen_a_ab, pen_b_ab = ab.penalty_1, ab.penalty_2
-        pen_a_ba, pen_b_ba = ba.penalty_2, ba.penalty_1
-        diff_ab = pen_a_ab - pen_b_ab
-        diff_ba = pen_a_ba - pen_b_ba
-        json_failed = ab.issues == JSON_FAILED_MARKER or ba.issues == JSON_FAILED_MARKER
-        if json_failed:
-            n_json_failed += 1
-        contradictory = json_failed or ((diff_ab > 0 and diff_ba < 0) or (diff_ab < 0 and diff_ba > 0))
-        angles.append(
-            {
-                "theta": _theta,
-                "phi": _phi,
-                "weight": weight,
-                "label": label,
-                "ab": _strip_issues(ab),
-                "ba": _strip_issues(ba),
-                "pen_a": (pen_a_ab + pen_a_ba) / 2,
-                "pen_b": (pen_b_ab + pen_b_ba) / 2,
-                "diff_ab": diff_ab,
-                "diff_ba": diff_ba,
-                "contradictory": contradictory,
-                "json_failed": json_failed,
-            }
-        )
+        order.append(angle)
+
+    if not order:
+        return {"angles": [], "n_total": 0, "n_contradictory": 0, "n_consistent": 0, "n_json_failed": 0, "early_stopped": 0}
+
+    results: list[dict] = []
+    early_stopped = 0
+    if early_stop is not None and early_stop.enabled:
+        for angle in order[: early_stop.angles.value]:
+            results.append(await _angle(*angle))
+            if _s1_early_gate(results, early_stop):
+                early_stopped = len(results)
+                break
+        if not early_stopped and len(results) < len(order):
+            results.extend(await asyncio.gather(*(_angle(*angle) for angle in order[len(results):])))
+    else:
+        results = list(await asyncio.gather(*(_angle(*angle) for angle in order)))
+
     return {
-        "angles": angles,
-        "n_total": len(angles),
-        "n_contradictory": sum(1 for a in angles if a["contradictory"]),
-        "n_consistent": sum(1 for a in angles if not a["contradictory"]),
-        "n_json_failed": n_json_failed,
+        "angles": results,
+        "n_total": len(results),
+        "n_contradictory": sum(1 for a in results if a["contradictory"]),
+        "n_consistent": sum(1 for a in results if not a["contradictory"]),
+        "n_json_failed": sum(1 for a in results if a["json_failed"]),
+        "early_stopped": early_stopped,
     }
 
 
@@ -1132,7 +1160,7 @@ def _read_png_rgb(data: bytes) -> tuple[int, int, int, list[list[int]]]:
     return width, height, bytes_per_pixel, rows
 
 
-def _foreground_stats(rgb_pngs: list[bytes]) -> dict:
+def _foreground_stats_py(rgb_pngs: list[bytes]) -> dict:
     foreground = 0
     pale = 0
     grayish = 0
@@ -1171,6 +1199,52 @@ def _foreground_stats(rgb_pngs: list[bytes]) -> dict:
     }
 
 
+def _png_header(data: bytes) -> tuple[int, int]:
+    """(bit_depth, color_type) from the IHDR chunk; raises ValueError for non-PNG input."""
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError("Not a PNG")
+    _, _, bit_depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", data[16:29])
+    return bit_depth, color_type
+
+
+def _foreground_stats(rgb_pngs: list[bytes]) -> dict:
+    """Sampled foreground colour statistics of gray-background renders (the S3 gate).
+
+    Vectorised twin of `_foreground_stats_py` (same sampling, thresholds and integer ratios); blocking, so callers
+    run it in a worker thread.
+    """
+    if np is None:
+        return _foreground_stats_py(rgb_pngs)
+    foreground = pale = grayish = 0
+    luma_sum = 0.0
+    background = np.asarray(S3_BACKGROUND_RGB, dtype=np.int32)
+    for data in rgb_pngs:
+        bit_depth, color_type = _png_header(data)
+        if bit_depth != 8 or color_type not in (2, 6):
+            raise ValueError(f"Unsupported PNG: bit_depth={bit_depth}, color_type={color_type}")
+        with Image.open(io.BytesIO(data)) as img:
+            rgb = np.asarray(img.convert("RGB"))[::S3_SAMPLE_STEP, ::S3_SAMPLE_STEP].astype(np.int32)
+        px = rgb[np.abs(rgb - background).max(axis=-1) > S3_BACKGROUND_TOLERANCE]
+        if px.shape[0] == 0:
+            continue
+        max_c = px.max(axis=1)
+        min_c = px.min(axis=1)
+        saturation = np.where(max_c > 0, (max_c - min_c) / np.maximum(max_c, 1), 0.0)
+        luma = 0.2126 * px[:, 0] + 0.7152 * px[:, 1] + 0.0722 * px[:, 2]
+        foreground += int(px.shape[0])
+        grayish += int((saturation < S3_GRAYISH_SAT_MAX).sum())
+        pale += int(((luma > S3_PALE_LUMA_MIN) & (saturation < S3_PALE_SAT_MAX)).sum())
+        luma_sum += float(luma.sum())
+    if foreground == 0:
+        return {"foreground_samples": 0, "pale_fraction": 0.0, "grayish_fraction": 0.0, "mean_luma": 0.0}
+    return {
+        "foreground_samples": foreground,
+        "pale_fraction": pale / foreground,
+        "grayish_fraction": grayish / foreground,
+        "mean_luma": luma_sum / foreground,
+    }
+
+
 def _white_unsafe(stats: dict) -> bool:
     return bool(stats["pale_fraction"] >= S3_PALE_FRACTION_MIN and stats["grayish_fraction"] >= S3_GRAYISH_FRACTION_MIN)
 
@@ -1191,7 +1265,7 @@ async def _s3_run(
         return {"fired": False, "choice": None, "reason": "gray PNGs unavailable"}
 
     try:
-        stats = _foreground_stats([a_png, b_png])
+        stats = await asyncio.to_thread(_foreground_stats, [a_png, b_png])
     except Exception as exc:
         logger.warning(f"s3 foreground stats failed: {exc}")
         return {"fired": False, "choice": None, "reason": "stats parse failed"}
@@ -1421,6 +1495,8 @@ async def evaluate_duel(
     model: str = MODEL,
     log_id: str = "",
     max_stage: int = 4,
+    s1_temperature: float = 0.0,
+    early_stop: "S1EarlyStopConfig | None" = None,
 ) -> tuple[str, dict]:
     """Run the multi-stage pipeline up to `max_stage`. Returns (winner, detail).
 
@@ -1432,7 +1508,7 @@ async def evaluate_duel(
             for R&D quality scoring where you average `pen_a`/`pen_b` across angles.
         2 — S1 + S2 (three sub-judges).
         3 — S1 + S2 + S3 (gray rescue runs only if S2 was a draw).
-        4 — full pipeline including S4 side guard (mainnet behaviour).
+        4 — full pipeline including S4 side guard (default).
     """
     if not 1 <= max_stage <= 4:
         raise ValueError(f"max_stage must be 1-4, got {max_stage}")
@@ -1440,13 +1516,25 @@ async def evaluate_duel(
     detail: dict[str, Any] = {}
     duel_start = asyncio.get_running_loop().time()
 
+    embeds: tuple[dict | None, dict | None] | None = None
+
+    async def _embeddings() -> tuple[dict | None, dict | None]:
+        nonlocal embeds
+        if embeds is None:
+            embeds = tuple(await asyncio.gather(left_views.fetch_embeddings(), right_views.fetch_embeddings()))
+        return embeds
+
     explain_task = asyncio.create_task(
         _explain_run(vlm, model, prompt_data_url, left_views.grid_url(), right_views.grid_url(), seed)
     )
 
     # Stage 1
     t = asyncio.get_running_loop().time()
-    s1 = await _s1_run(vlm, model, sem, prompt_data_url, left_views, right_views, seed)
+    s1 = await _s1_run(
+        vlm, model, sem, prompt_data_url, left_views, right_views, seed, temperature=s1_temperature, early_stop=early_stop,
+    )
+    if s1.get("early_stopped"):
+        logger.debug(f"{log_id}: S1 early stop after {s1['early_stopped']} angle(s)")
     s1_choice, s1_reason = _s1_aggregate(s1)
     detail["s1"] = {**s1, "choice": s1_choice, "reason": s1_reason}
     detail["s1_slim"] = _slim_s1(s1, s1_choice)
@@ -1472,10 +1560,7 @@ async def evaluate_duel(
 
     # Stage 2 — all three sub-judges in parallel
     async def _bv_with_embeddings() -> dict | None:
-        left_embeds, right_embeds = await asyncio.gather(
-            left_views.fetch_embeddings(),
-            right_views.fetch_embeddings(),
-        )
+        left_embeds, right_embeds = await _embeddings()
         return await _s2bv_run(vlm, model, prompt_data_url, left_views, right_views, left_embeds, right_embeds, seed)
 
     t = asyncio.get_running_loop().time()

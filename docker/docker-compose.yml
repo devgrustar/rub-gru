@@ -11,6 +11,8 @@ services:
       - torch-cache:/root/.cache/torch
     ports:
       - "10006:10006"
+    # Judge vLLM keeps its multimodal processor cache in /dev/shm (see judge-critic-instance extra_args).
+    shm_size: "32gb"
     # runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

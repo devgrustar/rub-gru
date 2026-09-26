@@ -63,7 +63,6 @@ def build_pipeline(
     if ensemble_size > 1:
         judge: JudgeAgent | None = JudgeAgent(
             clients[actors.judge.client], settings=actors.judge,
-            max_stage=actors.judge.max_stage,
         )
         embedder: DinoEmbedder | None = (
             DinoEmbedder(settings.embedder) if settings.embedder.enabled else None
@@ -88,6 +87,8 @@ def build_pipeline(
         coder_ensemble_temperature=actors.coder.ensemble_temperature,
         render_from_object=settings.pipeline.render_from_object,
         seed_offset=settings.pipeline.seed_offset,
+        bracket=settings.pipeline.bracket,
+        orientation=settings.pipeline.orientation,
         refinement_enabled=settings.pipeline.refinement_enabled,
         max_iter=policy.max_iter,
         score_threshold=policy.score_threshold,

@@ -73,9 +73,6 @@ async def _watch_models(state: MinerState, app: FastAPI, pipeline: GenerationPip
                 state.set_llm_status(name, checker.result.state)
 
             if state.status == MinerStatus.WARMING_UP and state.models_ready():
-                # Coder throughput probe (once): batch wall = coder tokens / tok/s, so a slow host shows
-                # up here before any timed batch. Request REPLACE only while replacements remain; with
-                # remaining=0 the /status handler forces WARMING_UP again and the probe is not re-run.
                 probe_cfg = pipeline.settings.pipeline.coder_probe
                 if probe_cfg.enabled and "probe_tps" not in state.diag:
                     tps = await pipeline.run_coder_probe()
