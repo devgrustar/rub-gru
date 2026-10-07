@@ -9,7 +9,7 @@ pipeline:
   use_planner: false
   render_from_object: true
   refinement_enabled: false
-  seed_offset: 5100001
+  seed_offset: 5200034
   coder_probe:
     enabled: true
     concurrency: 48
@@ -43,8 +43,8 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "magicworld7/Qwen-3.6-27B-Harrier"
-      revision: "0ea625a0e6a71523ed4b3f05199109cfd08a59b0"
+      model: "magicworld7/Qwen-3.6-27B-Goshawk"
+      revision: "05bad764856c26ce8a8d9e9943c63402eafb4a76"
       gpu_ids: "0,1"
       tensor_parallel_size: 1
       data_parallel_size: 2
@@ -78,7 +78,7 @@ embedder:
 actors:
   planner:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Harrier"
+    model: "magicworld7/Qwen-3.6-27B-Goshawk"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -96,7 +96,7 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Harrier"
+    model: "magicworld7/Qwen-3.6-27B-Goshawk"
     workers: 96
     queue_size: 64
     max_tokens: 24576
@@ -109,7 +109,7 @@ actors:
     seed: 42
     enable_thinking: false
     multimodal: true
-    ensemble_size: 36
+    ensemble_size: 38
     ensemble_temperature: 0.8
     providers:
       order: []
