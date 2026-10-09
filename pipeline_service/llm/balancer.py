@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import contextvars
+
 from openai import AsyncOpenAI
+
+# A caller may pin all requests of one task to one replica (set this to the task id): the task's shared prefix
+# (system prompt + reference image) then stays in a single engine's prefix cache. None = plain round-robin.
+affinity_key: contextvars.ContextVar[str | None] = contextvars.ContextVar("llm_affinity_key", default=None)
 
 
 class LoadBalancedClient:
@@ -24,9 +30,20 @@ class LoadBalancedClient:
             schedule.append(clients[best])
         self._schedule = schedule
         self._i = 0
+        self._clients = list(clients)
+        self._load = [0] * len(clients)          # tasks pinned to each replica
+        self._pinned: dict[str, int] = {}
 
     @property
     def chat(self):
+        key = affinity_key.get()
+        if key is not None:
+            idx = self._pinned.get(key)
+            if idx is None:                       # a new task goes to the replica with the fewest pinned tasks
+                idx = min(range(len(self._clients)), key=lambda i: (self._load[i], i))
+                self._pinned[key] = idx
+                self._load[idx] += 1
+            return self._clients[idx].chat
         client = self._schedule[self._i % len(self._schedule)]
         self._i += 1
         return client.chat

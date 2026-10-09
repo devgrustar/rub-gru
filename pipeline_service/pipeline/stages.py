@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from config.settings import BracketConfig, OrientationConfig
+from llm.balancer import affinity_key
 from logger_config import logger
 from modules.scene_planner.schema import OSD
 from pipeline.orientation import orient_task
@@ -254,6 +255,7 @@ async def _resolve_bracket(
         """Compare two live candidates head-to-head; records the duel in task.meta["judge_duels"]."""
         enc_s = await _prepare(left, right)
         _t_q = time.monotonic()
+        affinity_key.set(task.stem)               # all duels of one prompt go to the same judge replica
         async with sem_judge:
             _t_s = time.monotonic()
             verdict = await judge.compare(

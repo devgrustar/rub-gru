@@ -61,8 +61,14 @@ def build_pipeline(
     critic = CriticAgent(clients[actors.critic.client], settings=actors.critic)
 
     if ensemble_size > 1:
+        judge_client = clients[actors.judge.client]
+        judge_extra = [n for n in actors.judge.extra_clients if n in clients]
+        if judge_extra:
+            judge_names = [actors.judge.client, *judge_extra]
+            judge_client = LoadBalancedClient([clients[n] for n in judge_names], [1] * len(judge_names))
+            logger.info(f"Judge load-balanced across {judge_names}")
         judge: JudgeAgent | None = JudgeAgent(
-            clients[actors.judge.client], settings=actors.judge,
+            judge_client, settings=actors.judge,
         )
         embedder: DinoEmbedder | None = (
             DinoEmbedder(settings.embedder) if settings.embedder.enabled else None

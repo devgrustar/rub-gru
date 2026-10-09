@@ -9,7 +9,7 @@ pipeline:
   use_planner: false
   render_from_object: true
   refinement_enabled: false
-  seed_offset: 5200034
+  seed_offset: 5300034
   coder_probe:
     enabled: true
     concurrency: 48
@@ -43,8 +43,8 @@ llm_clients:
     base_url: "http://localhost:8001/v1"
     api_key: "local"
     vllm:
-      model: "magicworld7/Qwen-3.6-27B-Goshawk"
-      revision: "05bad764856c26ce8a8d9e9943c63402eafb4a76"
+      model: "magicworld7/Qwen-3.6-27B-Merlin"
+      revision: "5c294550b5cb3c7082ea5510d11d32766864a74b"
       gpu_ids: "0,1"
       tensor_parallel_size: 1
       data_parallel_size: 2
@@ -52,7 +52,7 @@ llm_clients:
       gpu_memory_utilization: 0.9
       max_model_len: 81920
       max_num_seqs: 256
-      extra_args: ["--speculative-config", "{\"method\":\"mtp\",\"num_speculative_tokens\":2}"]
+      extra_args: ["--speculative-config", "{\"method\":\"mtp\",\"num_speculative_tokens\":3}"]
   judge-critic-instance:
     enabled: true
     base_url: "http://localhost:8002/v1"
@@ -60,13 +60,30 @@ llm_clients:
     vllm:
       model: "zai-org/GLM-4.6V-Flash"
       revision: "411bb4d77144a3f03accbf4b780f5acb8b7cde4e" 
-      gpu_ids: "2,3"
+      gpu_ids: "2"
       tensor_parallel_size: 1
-      data_parallel_size: 2
+      data_parallel_size: 1
       gpu_memory_utilization: 0.9
       max_model_len: 81920
-      max_num_seqs: 64
-      extra_args: ["--max-num-batched-tokens", "16384"]
+      max_num_seqs: 128
+      extra_args: ["--max-num-batched-tokens", "32768"]
+      vllm_bin: "/opt/vllm-glm-env/bin/vllm"
+      trust_remote_code: true
+      reasoning_parser: null
+  judge-critic-instance-b:
+    enabled: true
+    base_url: "http://localhost:8020/v1"
+    api_key: "local"
+    vllm:
+      model: "zai-org/GLM-4.6V-Flash"
+      revision: "411bb4d77144a3f03accbf4b780f5acb8b7cde4e"
+      gpu_ids: "3"
+      tensor_parallel_size: 1
+      data_parallel_size: 1
+      gpu_memory_utilization: 0.9
+      max_model_len: 81920
+      max_num_seqs: 128
+      extra_args: ["--max-num-batched-tokens", "32768"]
       vllm_bin: "/opt/vllm-glm-env/bin/vllm"
       trust_remote_code: true
       reasoning_parser: null
@@ -78,7 +95,7 @@ embedder:
 actors:
   planner:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Goshawk"
+    model: "magicworld7/Qwen-3.6-27B-Merlin"
     workers: 256
     queue_size: 128
     max_tokens: 32768
@@ -96,7 +113,7 @@ actors:
       allow_fallbacks: true
   coder:
     client: "coder-instance"
-    model: "magicworld7/Qwen-3.6-27B-Goshawk"
+    model: "magicworld7/Qwen-3.6-27B-Merlin"
     workers: 96
     queue_size: 64
     max_tokens: 24576
@@ -109,7 +126,7 @@ actors:
     seed: 42
     enable_thinking: false
     multimodal: true
-    ensemble_size: 38
+    ensemble_size: 46
     ensemble_temperature: 0.8
     providers:
       order: []
@@ -138,6 +155,7 @@ actors:
       allow_fallbacks: true
   judge:
     client: "judge-critic-instance"
+    extra_clients: ["judge-critic-instance-b"]
     model: "zai-org/GLM-4.6V-Flash"
     workers: 48
     queue_size: 48
